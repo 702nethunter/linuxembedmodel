@@ -21,6 +21,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 from . import config
+from .bm25 import evaluate_bm25
 from .train_embed import build_evaluator, build_sentence_transformer, load_pairs
 
 METRIC_KEYS = ("accuracy@1", "accuracy@5", "mrr@10", "ndcg@10", "recall@10")
@@ -52,6 +53,7 @@ def main() -> None:
     ap.add_argument("--model", type=Path, default=config.STAGE2_DIR)
     ap.add_argument("--compare", type=Path, nargs="+", default=None)
     ap.add_argument("--pairs", type=Path, default=config.PAIRS_JSONL)
+    ap.add_argument("--no-bm25", action="store_true", help="skip the lexical baseline")
     args = ap.parse_args()
 
     rows = load_pairs(args.pairs)
@@ -62,6 +64,12 @@ def main() -> None:
 
     targets = args.compare or [args.model]
     results: dict[str, dict[str, float]] = {}
+
+    # Lexical reference point. A dense model that does not clear BM25 has not
+    # earned its training cost, so this column comes first.
+    if not args.no_bm25:
+        print("  scoring BM25 (lexical baseline) …")
+        results["BM25"] = evaluate_bm25(val_rows)
     for path in targets:
         if not path.exists():
             print(f"  ! skipping missing {path}")
