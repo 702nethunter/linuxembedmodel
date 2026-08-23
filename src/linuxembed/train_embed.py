@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+from collections import defaultdict
 from pathlib import Path
 
 import torch
 from datasets import Dataset
+from torch.utils.data import SequentialSampler
 from sentence_transformers import (
     SentenceTransformer,
     SentenceTransformerTrainer,
@@ -43,6 +46,62 @@ from .losses import GISTInfoNCELoss
 
 class EmbedTrainer(NormalizeAccumLossMixin, SentenceTransformerTrainer):
     """SentenceTransformerTrainer with the same accumulation fix. See accum.py."""
+
+
+class SequentialBatchTrainer(EmbedTrainer):
+    """Feeds the dataset in the order given, without reshuffling.
+
+    Used with subsystem-grouped ordering so each micro-batch is drawn from one
+    kernel subsystem. GIST can only mask a candidate the guide ranks above the
+    true positive, which effectively never happens when in-batch candidates are
+    unrelated functions. Measured mask rate on the held-out set:
+
+        random batches + sibling negatives   0.027% of candidates, 1.2% of rows
+        same-subsystem batches + siblings    0.372% of candidates, 8.4% of rows
+
+    Grouping is what gives GIST anything to act on.
+    """
+
+    def _get_train_sampler(self, *args, **kwargs):
+        return SequentialSampler(self.train_dataset)
+
+
+def subsystem(path: str) -> str:
+    parts = path.split("/")
+    return "/".join(parts[:2]) if len(parts) > 1 else parts[0]
+
+
+def group_by_subsystem(rows: list[dict], batch: int, seed: int) -> list[dict]:
+    """Order rows so consecutive `batch`-sized runs share a subsystem.
+
+    Rows are shuffled within each subsystem and the subsystem order is shuffled,
+    so grouping does not also impose a fixed curriculum. Subsystems with fewer
+    than `batch` rows are pooled into a remainder so nothing is discarded.
+    """
+    rng = random.Random(seed)
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        buckets[subsystem(row["path"])].append(row)
+
+    blocks: list[list[dict]] = []
+    remainder: list[dict] = []
+    for group in buckets.values():
+        rng.shuffle(group)
+        for i in range(0, len(group), batch):
+            chunk = group[i : i + batch]
+            if len(chunk) == batch:
+                blocks.append(chunk)
+            else:
+                remainder.extend(chunk)
+
+    # Tail chunks from every subsystem are pooled and re-batched, so no row is
+    # dropped; these mixed batches are the price of keeping the full dataset.
+    rng.shuffle(remainder)
+    for i in range(0, len(remainder), batch):
+        blocks.append(remainder[i : i + batch])
+
+    rng.shuffle(blocks)
+    return [row for block in blocks for row in block]
 
 
 def load_pairs(path: Path) -> list[dict]:
@@ -104,6 +163,12 @@ def main() -> None:
     ap.add_argument("--stage", type=int, choices=(1, 2), required=True)
     ap.add_argument("--pairs", type=Path, default=config.PAIRS_JSONL)
     ap.add_argument("--encoder", type=Path, default=config.PRETRAIN_DIR / "phase2")
+    ap.add_argument("--homogeneous-batches", action="store_true",
+                    help="draw each micro-batch from one subsystem, so in-batch "
+                         "candidates are confusable and GIST has something to mask")
+    ap.add_argument("--w-gist", type=float, default=None, help="override W_GIST")
+    ap.add_argument("--w-infonce", type=float, default=None, help="override W_INFONCE")
+    ap.add_argument("--out", type=Path, default=None, help="override output dir")
     args = ap.parse_args()
 
     torch.manual_seed(config.SEED)
@@ -112,6 +177,10 @@ def main() -> None:
     val_rows = rows[: config.PAIR_VAL_SIZE]
     train_rows = rows[config.PAIR_VAL_SIZE :]
     print(f"  pairs: {len(train_rows):,} train  /  {len(val_rows):,} held-out")
+
+    if args.homogeneous_batches:
+        train_rows = group_by_subsystem(train_rows, config.EMBED_BATCH, config.SEED)
+        print(f"  batching: subsystem-grouped (micro-batch {config.EMBED_BATCH})")
 
     train_ds = Dataset.from_list([
         {"anchor": r["anchor"], "positive": r["positive"], "negative": r["negative"]}
@@ -133,8 +202,19 @@ def main() -> None:
         guide = SentenceTransformer(str(config.STAGE1_DIR))
         out_dir = config.STAGE2_DIR
         epochs, lr = config.EMBED_EPOCHS_STAGE2, config.EMBED_LR_STAGE2
-        print(f"  stage 2 — {config.W_GIST} * GIST + {config.W_INFONCE} * InfoNCE "
-              f"(self-guided by stage 1)")
+
+    w_gist = config.W_GIST if args.w_gist is None else args.w_gist
+    w_infonce = config.W_INFONCE if args.w_infonce is None else args.w_infonce
+    if args.out is not None:
+        out_dir = args.out
+    if args.stage == 2:
+        # w_gist=0 turns stage 2 into an InfoNCE-only control, which is the only
+        # way to attribute a metric change to GIST rather than to the extra epochs.
+        kind = "InfoNCE only (GIST disabled)" if w_gist == 0 else \
+               f"{w_gist} * GIST + {w_infonce} * InfoNCE (self-guided by stage 1)"
+        print(f"  stage 2 — {kind}")
+        if w_gist == 0:
+            guide = None
 
     model.max_seq_length = config.EMBED_MAX_SEQ
     evaluator = build_evaluator(val_rows, name=f"kernel-stage{args.stage}")
@@ -146,8 +226,8 @@ def main() -> None:
         model=model,
         guide=guide,
         scale=config.EMBED_SCALE,
-        w_gist=config.W_GIST,
-        w_infonce=config.W_INFONCE,
+        w_gist=w_gist,
+        w_infonce=w_infonce,
     )
 
     targs = SentenceTransformerTrainingArguments(
@@ -162,7 +242,10 @@ def main() -> None:
         gradient_checkpointing=True,
         # NO_DUPLICATES keeps the same text from appearing twice in a batch,
         # which would otherwise be a guaranteed false negative.
-        batch_sampler=BatchSamplers.NO_DUPLICATES,
+        # Subsystem grouping must survive to the dataloader, so it cannot also
+        # be reshuffled by NO_DUPLICATES.
+        batch_sampler=BatchSamplers.BATCH_SAMPLER if args.homogeneous_batches
+        else BatchSamplers.NO_DUPLICATES,
         eval_strategy="no",
         save_strategy="epoch",
         save_total_limit=1,
@@ -172,7 +255,8 @@ def main() -> None:
         seed=config.SEED,
     )
 
-    trainer = EmbedTrainer(
+    trainer_cls = SequentialBatchTrainer if args.homogeneous_batches else EmbedTrainer
+    trainer = trainer_cls(
         model=model, args=targs, train_dataset=train_ds, loss=loss
     )
     trainer.train()
