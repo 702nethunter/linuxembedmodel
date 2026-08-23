@@ -123,8 +123,9 @@ def main() -> None:
         print(f"  continuing from {args.resume}")
         model = BertForMaskedLM.from_pretrained(args.resume)
 
-    train_ds = PackedTokenDataset(config.TRAIN_BIN, seq_len)
-    val_ds = PackedTokenDataset(config.VAL_BIN, seq_len)
+    n_special = len(config.SPECIAL_TOKENS)
+    train_ds = PackedTokenDataset(config.TRAIN_BIN, seq_len, n_special)
+    val_ds = PackedTokenDataset(config.VAL_BIN, seq_len, n_special)
     print(f"  phase {args.phase}: seq={seq_len} batch={batch}x{accum} "
           f"(effective {batch * accum}) steps={steps:,}")
     print(f"  windows: {len(train_ds):,} train / {len(val_ds):,} val")
