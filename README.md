@@ -37,7 +37,8 @@ genuinely poor for C:
 
 ## The corpus is not just "the kernel"
 
-The kernel tree holds **1340 MB** of `.c`/`.h`. Only **872 MB** of it is usable.
+The kernel tree holds **1340 MB** of `.c`/`.h`. Only **845 MB** of it survives
+filtering — 62,595 files, **342.6M tokens**.
 
 The other **468 MB — 35% of the corpus, in just 476 files** — is auto-generated
 hardware register headers, overwhelmingly under
@@ -54,7 +55,8 @@ of every MLM batch would teach the model hex-constant formatting rather than C.
 
 `corpus.py` drops them with a *structural* test — ≥500 lines and ≥60% `#define`
 density — rather than a hardcoded path, so equivalent generated headers
-elsewhere in the tree are caught too.
+elsewhere in the tree are caught too. On v7.1-rc5 that removes 702 files by
+density plus 37 more too large to be hand-written.
 
 ## Where supervision comes from
 
@@ -86,6 +88,9 @@ Hard negatives are **sibling functions from the same file** — same subsystem,
 same types, same idioms, wrong function. Records with no sibling are dropped
 rather than given a random negative, which would be trivially easy and
 contribute no gradient signal.
+
+Yield on v7.1-rc5: 50,881 parsed → 48,865 after anchor dedup → **48,777 pairs**
+with hard negatives (37,367 function, 11,410 struct).
 
 ## The loss
 
@@ -158,6 +163,43 @@ one.
   instability fp16 causes when training from random init.
 - **Single-forward-pass loss**, gradient checkpointing, and gradient
   accumulation to an effective batch of 256 (pretrain) / 96 (contrastive).
+
+Measured on the 3070: **~69k tokens/sec at both seq 128 and seq 512** (5.31 GB
+and 4.77 GB peak). Throughput is flat across sequence length, so at this model
+size the run is compute-bound rather than attention-bound. seq 512 at batch 32
+OOMs; batch 16 leaves comfortable headroom.
+
+## A bug worth knowing about
+
+Gradient accumulation is **silently broken** in transformers 4.47. At the same
+effective batch of 64:
+
+| | logged loss | grad_norm |
+|---|---|---|
+| `accum=1` | 10.478 | 5.43 |
+| `accum=4` | 41.997 | 23.75 |
+
+`grad_norm` scales with the accumulation factor, so those are genuinely inflated
+gradients, not just a mis-printed number — the optimizer sees **`accum` × the
+intended learning rate**. Pretrain phase 2 uses `accum=16`, which would have run
+at an effective 8e-3 against an intended 5e-4, and would not have trained.
+
+The cause is the `model_accepts_loss_kwargs` path: `BertForMaskedLM.forward`
+accepts `**loss_kwargs`, so `Trainer` passes `num_items_in_batch` and then skips
+its own division on the assumption the model normalised the loss itself — which
+this model does not. Setting `trainer.model_accepts_loss_kwargs = False` after
+construction does **not** help (verified: byte-identical losses).
+
+`accum.py` divides the loss before `backward()`, fixing reporting and gradients
+together. After the fix, `accum` 1 / 4 / 16 agree: 10.478 / 10.499 / 10.494.
+
+```bash
+python scripts/check_accum.py          # expect PASS
+python scripts/check_accum.py --stock  # expect FAIL on 4.47
+```
+
+If you upgrade transformers, re-run that check — the mixin should be removed
+once it is no longer needed.
 
 ## Running it
 
