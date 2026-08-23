@@ -225,12 +225,29 @@ python -m linuxembed.evaluate            # held-out retrieval metrics
 Every stage is resumable and writes to `data/` or `artifacts/`, both gitignored
 — they are large and fully reproducible from this code plus a kernel tree.
 
-## Evaluation
+## Results
 
-`evaluate.py` reports Accuracy@1/@5, MRR@10 and NDCG@10 on held-out kernel-doc
-pairs, against a corpus that includes every held-out positive **and** its hard
-negative as a distractor. `--compare` scores several checkpoints side by side so
-the contribution of each stage is visible:
+2,000 held-out kernel-doc pairs. The corpus contains every held-out positive
+**and** its hard negative, so the model has to separate a function from its own
+sibling, not from unrelated code.
+
+| metric | BM25 | MLM only | **stage 1 (InfoNCE)** | stage 2 (GIST+InfoNCE) |
+|---|---|---|---|---|
+| accuracy@1 | 0.7115 | 0.2535 | **0.9225** | 0.9210 |
+| accuracy@5 | 0.9035 | 0.4525 | **0.9930** | 0.9930 |
+| MRR@10 | 0.7948 | 0.3371 | **0.9558** | 0.9542 |
+| NDCG@10 | 0.8297 | 0.3856 | **0.9659** | 0.9644 |
+| recall@10 | 0.9365 | 0.5415 | **0.9950** | 0.9940 |
+
+A 43M-parameter encoder trained from scratch on one 8 GB card beats BM25
+decisively: accuracy@1 0.71 → 0.92, NDCG@10 0.83 → 0.97.
+
+The MLM column matters as much as the BM25 one. Pretraining alone scores 0.386
+NDCG — the encoder learns C, but nothing about retrieval. Contrastive training
+supplies almost all of the retrieval ability.
+
+MLM pretraining itself: final loss 0.5314, perplexity 1.70, with train and eval
+tracking within 0.003.
 
 ```bash
 python -m linuxembed.evaluate --compare \
@@ -238,6 +255,57 @@ python -m linuxembed.evaluate --compare \
     artifacts/embed-stage1-infonce \
     artifacts/embed-stage2-gist
 ```
+
+### GIST did not earn its place
+
+Stage 2 is a small regression on every metric (−0.0015 NDCG). That is not GIST
+hurting — it is GIST doing **nothing**, and two extra epochs adding noise.
+
+GIST masks **8 of 33,840 candidates: 0.024%**, touching 1.2% of rows.
+
+The mechanism only fires when the guide ranks a distractor *above* the true
+positive. Our guide is the stage-1 model, already 92% accurate, so it almost
+never does. And the hard negatives are curated sibling functions — genuine
+negatives, not the false negatives GIST exists to remove. Self-guided GIST also
+cannot contribute information the student lacks, since guide and student start
+identical.
+
+Larger batches are the obvious suspect and are **not** the answer — measured
+across batch sizes, GIST still fires on only 3.6% of rows at batch 1024:
+
+| batch | mask rate | rows hit |
+|---|---|---|
+| 24 | 0.018% | 0.8% |
+| 256 | 0.004% | 1.8% |
+| 1024 | 0.003% | 3.6% |
+
+What *does* change it is making in-batch candidates confusable. Drawing each
+micro-batch from a single kernel subsystem raises the firing rate 14×:
+
+| regime | mask rate | rows hit |
+|---|---|---|
+| random batches + sibling negatives | 0.027% | 1.2% |
+| random batches, in-batch negatives only | 0.000% | 0.0% |
+| **same-subsystem batches + siblings** | **0.372%** | **8.4%** |
+
+`--homogeneous-batches` implements that grouping, and `--w-gist 0` gives an
+InfoNCE-only control under identical batching — the only way to attribute a
+metric change to GIST rather than to the extra epochs.
+
+## Searching the kernel
+
+```bash
+python -m linuxembed.search build
+python -m linuxembed.search query "how does the buddy allocator split pages"
+python -m linuxembed.search query "acquire a spinlock without disabling irqs" --hybrid
+```
+
+`--hybrid` fuses the dense ranking with BM25 by reciprocal rank fusion. Cosine
+scores and BM25 scores are on different scales and cannot be added, so RRF
+combines ranks instead and needs no calibration.
+
+Whether hybrid actually beats dense alone here is measured, not assumed — see
+the complementarity numbers below.
 
 ## Licensing
 
