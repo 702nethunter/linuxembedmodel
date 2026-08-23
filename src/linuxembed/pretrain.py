@@ -35,6 +35,11 @@ from transformers import (
 )
 
 from . import config
+from .accum import NormalizeAccumLossMixin
+
+
+class MLMTrainer(NormalizeAccumLossMixin, Trainer):
+    """Trainer with gradient-accumulation loss normalisation. See accum.py."""
 
 
 class PackedTokenDataset(Dataset):
@@ -160,7 +165,7 @@ def main() -> None:
         seed=config.SEED,
     )
 
-    trainer = Trainer(
+    trainer = MLMTrainer(
         model=model, args=targs, train_dataset=train_ds,
         eval_dataset=val_ds, data_collator=collator,
     )

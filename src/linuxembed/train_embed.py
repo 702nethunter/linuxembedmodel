@@ -37,7 +37,12 @@ from sentence_transformers.evaluation import InformationRetrievalEvaluator
 from sentence_transformers.training_args import BatchSamplers
 
 from . import config
+from .accum import NormalizeAccumLossMixin
 from .losses import GISTInfoNCELoss
+
+
+class EmbedTrainer(NormalizeAccumLossMixin, SentenceTransformerTrainer):
+    """SentenceTransformerTrainer with the same accumulation fix. See accum.py."""
 
 
 def load_pairs(path: Path) -> list[dict]:
@@ -167,7 +172,7 @@ def main() -> None:
         seed=config.SEED,
     )
 
-    trainer = SentenceTransformerTrainer(
+    trainer = EmbedTrainer(
         model=model, args=targs, train_dataset=train_ds, loss=loss
     )
     trainer.train()
