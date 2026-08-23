@@ -171,18 +171,27 @@ def redis_knn(client, query_vec: np.ndarray, k: int) -> list[dict]:
         "RETURN", "6", "path", "name", "kind", "line", "code", "score",
         "DIALECT", "2",
     )
+    def as_str(value) -> str:
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+
     out = []
+    # res is [total, key1, [field, value, ...], key2, [...], ...]
     for i in range(1, len(res), 2):
         fields = res[i + 1]
-        d = {fields[j].decode(): fields[j + 1] for j in range(0, len(fields) - 1, 2)}
+        if not fields:
+            continue
+        # Keys and values both come back as bytes; normalise keys to str once
+        # and read them as str everywhere (mixing the two silently yields empty
+        # fields rather than an error).
+        d = {as_str(fields[j]): fields[j + 1] for j in range(0, len(fields) - 1, 2)}
         out.append({
-            "path": d[b"path"].decode() if isinstance(d.get(b"path"), bytes) else d.get("path", ""),
-            "name": d.get(b"name", b"").decode(),
-            "kind": d.get(b"kind", b"").decode(),
-            "line": int(d.get(b"line", b"0") or 0),
-            "code": d.get(b"code", b"").decode(),
+            "path": as_str(d.get("path", "")),
+            "name": as_str(d.get("name", "")),
+            "kind": as_str(d.get("kind", "")),
+            "line": int(as_str(d.get("line", "0")) or 0),
+            "code": as_str(d.get("code", "")),
             # RediSearch returns COSINE *distance*; similarity is 1 - distance.
-            "score": 1.0 - float(d.get(b"score", b"1")),
+            "score": 1.0 - float(as_str(d.get("score", "1"))),
         })
     return out
 
