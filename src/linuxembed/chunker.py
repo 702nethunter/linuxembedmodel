@@ -34,13 +34,24 @@ from .mine_pairs import match_braces
 
 # A top-level definition starts in column 0 -- inside a function everything is
 # indented -- contains a parameter list, and opens a brace.
+#
+# The return-type prefix is OPTIONAL. Kernel style routinely breaks a long
+# signature across lines:
+#
+#     struct task_struct *
+#     pick_next_task_fair(struct rq *rq, ...)
+#
+# which leaves the name alone in column 0. Requiring a same-line return type
+# silently dropped every such function -- pick_next_task_fair among them.
 FUNC_RE = re.compile(
-    r"^(?![\s#/])"                 # column 0, not a directive or comment
-    r"([A-Za-z_][A-Za-z0-9_ \t\*\(\),\[\]]*?)"  # return type and qualifiers
-    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*"            # symbol name
-    r"\(",                                       # start of parameter list
+    r"^(?![\s#/])"                                       # column 0, not a directive
+    r"(?:[A-Za-z_][A-Za-z0-9_ \t\*\(\),\[\]]*?\b)?"      # optional return type
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*"                       # symbol name
+    r"\(",                                                # start of parameter list
     re.M,
 )
+# A line holding only the return type of the definition below it.
+RETURN_TYPE_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ \t\*]*\**\s*$")
 RECORD_RE = re.compile(
     r"^(?:typedef\s+)?(struct|union|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{",
     re.M,
@@ -93,6 +104,39 @@ def leading_comment(text: str, start: int) -> str:
     return "\n".join(reversed(collected)).strip()
 
 
+def match_parens(text: str, open_idx: int) -> int | None:
+    """Index just past the ')' matching text[open_idx] == '('.
+
+    A plain find(')') is wrong for function-pointer parameters such as
+    `int foo(void (*cb)(int), int x)`, where the first ')' closes the callback's
+    own list and everything after it gets mis-sliced.
+    """
+    depth = 0
+    for i in range(open_idx, len(text)):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif c in ";{}" and depth == 0:
+            return None
+    return None
+
+
+def widen_to_return_type(text: str, start: int) -> int:
+    """Move `start` back over a return type that sits on its own line."""
+    line_start = text.rfind("\n", 0, start) + 1
+    if line_start == 0:
+        return start
+    prev_start = text.rfind("\n", 0, line_start - 1) + 1
+    prev = text[prev_start : line_start - 1]
+    if RETURN_TYPE_LINE_RE.match(prev) and not prev.strip().endswith((";", "{", "}", ":", ",")):
+        return prev_start
+    return start
+
+
 def truncate(code: str) -> str:
     lines = code.split("\n")
     if len(lines) > MAX_CHUNK_LINES:
@@ -106,24 +150,26 @@ def extract_definitions(path: str, text: str) -> list[dict]:
     covered: list[tuple[int, int]] = []
 
     for m in FUNC_RE.finditer(text):
-        name = m.group(2)
-        if name in ("if", "for", "while", "switch", "return", "sizeof", "defined"):
+        name = m.group(1)
+        if name in ("if", "for", "while", "switch", "return", "sizeof", "defined",
+                    "do", "else", "case", "goto"):
             continue
-        close = text.find(")", m.end())
-        if close == -1:
+        close = match_parens(text, m.end() - 1)
+        if close is None:
             continue
-        # Between ')' and '{' only attributes may appear; a ';' means it is a
-        # prototype, not a definition.
-        gap = text[close + 1 : close + 200]
+        # Between ')' and '{' only attributes may appear (__must_hold, __acquires,
+        # __init and friends); a ';' means it is a prototype, not a definition.
+        gap = text[close : close + 300]
         brace_off = gap.find("{")
         if brace_off == -1 or ";" in gap[:brace_off]:
             continue
-        brace = close + 1 + brace_off
+        brace = close + brace_off
         end = match_braces(text, brace)
         if end is None:
             continue
-        comment = leading_comment(text, m.start())
-        body = text[m.start() : end]
+        start = widen_to_return_type(text, m.start())
+        comment = leading_comment(text, start)
+        body = text[start:end]
         out.append({
             "path": path, "name": name, "kind": "function",
             "code": truncate((comment + "\n" + body) if comment else body),
