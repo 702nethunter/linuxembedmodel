@@ -31,11 +31,17 @@ INDEX_NPY = config.OUT_DIR / "search_index.npy"
 INDEX_META = config.OUT_DIR / "search_meta.jsonl"
 
 
-def load_documents(pairs_path: Path) -> list[dict]:
-    """One entry per mined definition, deduplicated by (path, symbol)."""
+def load_documents(source: Path) -> list[dict]:
+    """Load retrievable documents, deduplicated by (path, symbol).
+
+    Accepts either chunks.jsonl from chunker.py (field `code`, full-tree
+    coverage) or pairs.jsonl from mine_pairs.py (field `positive`, kernel-doc'd
+    definitions only). chunks.jsonl is what RAG should use; pairs.jsonl is
+    handled so a retrieval-only demo works before the chunker has been run.
+    """
     seen: set[tuple[str, str]] = set()
     docs: list[dict] = []
-    with open(pairs_path, encoding="utf-8") as fh:
+    with open(source, encoding="utf-8") as fh:
         for line in fh:
             if not line.strip():
                 continue
@@ -47,8 +53,9 @@ def load_documents(pairs_path: Path) -> list[dict]:
             docs.append({
                 "path": row["path"],
                 "name": row["name"],
-                "kind": row["kind"],
-                "code": row["positive"],
+                "kind": row.get("kind", "function"),
+                "code": row.get("code") or row["positive"],
+                "line": row.get("line", 0),
             })
     return docs
 
@@ -56,18 +63,20 @@ def load_documents(pairs_path: Path) -> list[dict]:
 def cmd_build(args: argparse.Namespace) -> None:
     from sentence_transformers import SentenceTransformer
 
-    docs = load_documents(args.pairs)
+    docs = load_documents(args.source)
     print(f"  indexing {len(docs):,} kernel definitions with {args.model}")
 
     model = SentenceTransformer(str(args.model))
     model.max_seq_length = config.EMBED_MAX_SEQ
+    # float16 halves a multi-million-row index with no measurable retrieval
+    # difference; the matmul is promoted back to float32 at query time.
     vecs = model.encode(
         [d["code"] for d in docs],
         batch_size=args.batch_size,
         normalize_embeddings=True,
         show_progress_bar=True,
         convert_to_numpy=True,
-    ).astype(np.float32)
+    ).astype(np.float16)
 
     INDEX_NPY.parent.mkdir(parents=True, exist_ok=True)
     np.save(INDEX_NPY, vecs)
@@ -78,6 +87,23 @@ def cmd_build(args: argparse.Namespace) -> None:
     size = INDEX_NPY.stat().st_size / 1048576
     print(f"  saved {vecs.shape} -> {INDEX_NPY} ({size:.0f} MB)")
     print(f"  saved metadata -> {INDEX_META}")
+
+
+def dense_similarity(vecs: np.ndarray, query: np.ndarray, block: int = 200_000) -> np.ndarray:
+    """Cosine similarity of `query` against every row of `vecs`.
+
+    Both sides are L2-normalised, so a dot product is the cosine. The index is
+    stored float16; casting it whole would materialise a copy twice its size
+    (4 GB at a few million rows), and a float16 matmul has no BLAS path and
+    loses precision on near-ties. Blocking keeps the temporary bounded while
+    still accumulating in float32.
+    """
+    query = query.astype(np.float32)
+    out = np.empty(vecs.shape[0], dtype=np.float32)
+    for start in range(0, vecs.shape[0], block):
+        stop = min(start + block, vecs.shape[0])
+        out[start:stop] = vecs[start:stop].astype(np.float32) @ query
+    return out
 
 
 def rrf_fuse(rankings: list[list[int]], k: int = 60) -> dict[int, float]:
@@ -106,7 +132,7 @@ def cmd_query(args: argparse.Namespace) -> None:
     model = SentenceTransformer(str(args.model))
     model.max_seq_length = config.EMBED_MAX_SEQ
     q = model.encode([args.text], normalize_embeddings=True, convert_to_numpy=True)
-    dense_scores = (vecs @ q[0]).astype(np.float32)
+    dense_scores = dense_similarity(vecs, q[0])
     dense_order = np.argsort(-dense_scores)
 
     if args.hybrid:
@@ -139,9 +165,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Semantic search over the kernel")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    b = sub.add_parser("build", help="embed every mined definition")
+    b = sub.add_parser("build", help="embed every kernel chunk")
     b.add_argument("--model", type=Path, default=config.STAGE1_DIR)
-    b.add_argument("--pairs", type=Path, default=config.PAIRS_JSONL)
+    b.add_argument("--source", type=Path, default=config.DATA_DIR / "chunks.jsonl",
+                   help="chunks.jsonl (full tree) or pairs.jsonl (documented only)")
     b.add_argument("--batch-size", type=int, default=64)
     b.set_defaults(func=cmd_build)
 
