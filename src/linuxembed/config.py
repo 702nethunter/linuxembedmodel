@@ -34,7 +34,10 @@ GENERATED_DEFINE_RATIO = 0.60  # >60% of non-blank lines are #define
 GENERATED_MIN_LINES = 500  # ...and the file is long enough for that to be meaningful
 MAX_FILE_BYTES = 4 * 1024 * 1024  # skip anything pathologically large
 
-VAL_FRACTION = 0.005  # held-out slice of the token stream for MLM eval
+# Fraction of FILES (not tokens) held out for MLM eval. Whole files are held
+# out, chosen by hashing the path, so validation spans every subsystem and no
+# validation window sits adjacent to a training window of the same file.
+VAL_FRACTION = 0.01
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 # Byte-level BPE: never emits [UNK] on arbitrary bytes, and keeps C identifiers

@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from multiprocessing import Pool
 from pathlib import Path
@@ -43,11 +44,31 @@ def _encode(text: str) -> np.ndarray:
     return np.asarray(ids, dtype=np.uint16)
 
 
-def read_texts(path: Path):
+def read_docs(path: Path):
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             if line.strip():
-                yield json.loads(line)["text"]
+                doc = json.loads(line)
+                yield doc["path"], doc["text"]
+
+
+def is_val_file(rel_path: str, fraction: float) -> bool:
+    """Assign whole files to validation by a hash of their path.
+
+    An earlier version took validation as the contiguous tail of the token
+    stream. That looked like a clean held-out region but was not: corpus.jsonl
+    is in directory-traversal order, so the tail was entirely mm/kasan,
+    mm/kmsan and mm/damon/tests -- one subsystem of highly formulaic sanitizer
+    and kunit boilerplate, with its sibling files all in training. The result
+    was an eval loss 3x *lower* than train loss (0.42 vs 1.34), which is
+    backwards and would have hidden overfitting for the whole run.
+
+    Hashing the path instead gives a random sample spread across every
+    subsystem, and holding out whole files means no window of a validation file
+    is adjacent to a training window of the same file.
+    """
+    digest = hashlib.blake2b(rel_path.encode("utf-8"), digest_size=8).hexdigest()
+    return (int(digest, 16) % 1_000_000) < fraction * 1_000_000
 
 
 def main() -> None:
@@ -63,29 +84,43 @@ def main() -> None:
     args.train_out.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Tokenizing {args.corpus} with {args.workers} workers …")
-    chunks: list[np.ndarray] = []
+    docs = list(read_docs(args.corpus))
+    paths = [p for p, _ in docs]
+    train_chunks: list[np.ndarray] = []
+    val_chunks: list[np.ndarray] = []
     total = 0
+
     with Pool(args.workers, initializer=_init_worker, initargs=(str(args.tokenizer),)) as pool:
-        for i, arr in enumerate(pool.imap(_encode, read_texts(args.corpus), chunksize=64)):
-            chunks.append(arr)
+        # imap preserves input order, so arr[i] corresponds to paths[i].
+        stream = pool.imap(_encode, (t for _, t in docs), chunksize=64)
+        for i, arr in enumerate(stream):
+            if is_val_file(paths[i], config.VAL_FRACTION):
+                val_chunks.append(arr)
+            else:
+                train_chunks.append(arr)
             total += arr.size
             if (i + 1) % 5000 == 0:
                 print(f"  {i + 1:,} files … {total / 1e6:.1f}M tokens", flush=True)
 
-    stream = np.concatenate(chunks)
-    del chunks
-    n_val = int(len(stream) * config.VAL_FRACTION)
-    # Take validation from the tail so it is a contiguous held-out region rather
-    # than tokens interleaved with training windows.
-    train, val = stream[:-n_val], stream[-n_val:]
+    train = np.concatenate(train_chunks)
+    val = np.concatenate(val_chunks)
+    del train_chunks, val_chunks
 
     train.tofile(args.train_out)
     val.tofile(args.val_out)
 
-    print(f"\n  total  {len(stream) / 1e6:.1f}M tokens")
-    print(f"  train  {len(train) / 1e6:.1f}M -> {args.train_out} "
-          f"({args.train_out.stat().st_size / 1048576:.0f} MB)")
-    print(f"  val    {len(val) / 1e6:.1f}M -> {args.val_out}")
+    print(f"\n  total  {total / 1e6:.1f}M tokens across {len(docs):,} files")
+    print(f"  train  {len(train) / 1e6:.1f}M tokens / "
+          f"{len(docs) - sum(is_val_file(p, config.VAL_FRACTION) for p in paths):,} files "
+          f"-> {args.train_out} ({args.train_out.stat().st_size / 1048576:.0f} MB)")
+    print(f"  val    {len(val) / 1e6:.1f}M tokens / "
+          f"{sum(is_val_file(p, config.VAL_FRACTION) for p in paths):,} files "
+          f"-> {args.val_out}")
+
+    val_paths = [p for p in paths if is_val_file(p, config.VAL_FRACTION)]
+    subsys = sorted({p.split("/")[0] for p in val_paths})
+    print(f"  val spans {len(subsys)} top-level dirs: {', '.join(subsys[:12])}"
+          f"{' …' if len(subsys) > 12 else ''}")
 
 
 if __name__ == "__main__":
