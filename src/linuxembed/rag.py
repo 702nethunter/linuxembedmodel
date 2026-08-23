@@ -84,6 +84,35 @@ def call_ollama(model: str, prompt: str, timeout: int, num_ctx: int) -> str:
         )
 
 
+def retrieve_redis(text: str, k: int, hybrid: bool, encoder: Path) -> list[dict]:
+    """Retrieve from the Redis vector index.
+
+    Redis does the KNN, so no 900 MB array is loaded per process — which is what
+    makes this usable from a long-lived server rather than only a CLI.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    from .vectorstore import connect, redis_knn
+
+    client = connect()
+    model = SentenceTransformer(str(encoder))
+    model.max_seq_length = config.EMBED_MAX_SEQ
+    q = model.encode([text], normalize_embeddings=True, convert_to_numpy=True)[0]
+
+    # Over-fetch when re-ranking so BM25 has a pool to work with.
+    hits = redis_knn(client, q, k * 20 if hybrid else k)
+    if not hybrid:
+        return hits[:k]
+
+    from .bm25 import BM25
+
+    bm = BM25([h["code"] for h in hits])
+    lexical = [i for i, _ in bm.top_k(text, len(hits))]
+    fused = rrf_fuse([list(range(len(hits))), lexical])
+    order = sorted(fused, key=lambda d: -fused[d])[:k]
+    return [hits[i] for i in order]
+
+
 def retrieve(text: str, k: int, hybrid: bool, encoder: Path) -> list[dict]:
     from sentence_transformers import SentenceTransformer
 
@@ -123,11 +152,12 @@ def retrieve(text: str, k: int, hybrid: bool, encoder: Path) -> list[dict]:
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
-    hits = retrieve(args.question, args.k, args.hybrid, args.encoder)
+    fetch = retrieve_redis if args.store == "redis" else retrieve
+    hits = fetch(args.question, args.k, args.hybrid, args.encoder)
     context, used = build_context(hits, args.context_chars)
 
     print(f"\n  retrieved {len(used)} excerpts "
-          f"({'hybrid' if args.hybrid else 'dense'}):")
+          f"({'hybrid' if args.hybrid else 'dense'}, store={args.store}):")
     for i, d in enumerate(used, start=1):
         print(f"    [{i}] {d['path']}:{d.get('line', 0)}  {d['name']}  ({d['score']:.3f})")
 
@@ -153,6 +183,9 @@ def main() -> None:
     a.add_argument("question")
     a.add_argument("-k", type=int, default=8, help="excerpts to retrieve")
     a.add_argument("--hybrid", action="store_true", help="re-rank with BM25 via RRF")
+    a.add_argument("--store", choices=("redis", "npy"), default="redis",
+                   help="redis: server-side KNN, nothing loaded per process; "
+                        "npy: local array, no Redis needed")
     a.add_argument("--encoder", type=Path, default=config.STAGE1_DIR)
     a.add_argument("--llm", default=DEFAULT_LLM)
     a.add_argument("--num-ctx", type=int, default=8192)
