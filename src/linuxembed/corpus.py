@@ -60,17 +60,23 @@ def is_generated_noise(text: str) -> bool:
     return lines >= config.GENERATED_MIN_LINES and ratio >= config.GENERATED_DEFINE_RATIO
 
 
-def read_source(path: Path) -> str | None:
-    """Read a kernel source file. Kernel sources are mostly UTF-8 but not all."""
+def read_source(path: Path) -> tuple[str | None, str]:
+    """Read a kernel source file, returning (text, reason).
+
+    Kernel sources are mostly UTF-8 but not all. `reason` distinguishes the
+    skip causes so the summary does not lump the multi-megabyte generated
+    headers in with genuinely unreadable files.
+    """
     try:
         raw = path.read_bytes()
     except OSError:
-        return None
+        return None, "unreadable"
     if len(raw) > config.MAX_FILE_BYTES:
-        return None
+        # Almost always a generated register header too large to be hand-written.
+        return None, "oversized"
     if b"\x00" in raw[:8192]:  # binary masquerading as .h
-        return None
-    return raw.decode("utf-8", errors="replace")
+        return None, "binary"
+    return raw.decode("utf-8", errors="replace"), "ok"
 
 
 def main() -> None:
@@ -83,14 +89,17 @@ def main() -> None:
         sys.exit(f"kernel tree not found: {args.kernel}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
-    kept = skipped_generated = skipped_read = 0
-    kept_bytes = dropped_bytes = 0
+    kept = skipped_generated = 0
+    skipped: dict[str, int] = {"unreadable": 0, "oversized": 0, "binary": 0}
+    kept_bytes = dropped_bytes = oversized_bytes = 0
 
     with open(args.out, "w", encoding="utf-8") as fh:
         for i, path in enumerate(iter_source_files(args.kernel)):
-            text = read_source(path)
+            text, reason = read_source(path)
             if text is None:
-                skipped_read += 1
+                skipped[reason] += 1
+                if reason == "oversized":
+                    oversized_bytes += path.stat().st_size
                 continue
             if is_generated_noise(text):
                 skipped_generated += 1
@@ -104,9 +113,12 @@ def main() -> None:
             if (i + 1) % 5000 == 0:
                 print(f"  scanned {i + 1:,} files … kept {kept:,}", flush=True)
 
-    print(f"\n  kept              {kept:,} files  ({kept_bytes / 1048576:.1f} MB)")
-    print(f"  dropped generated {skipped_generated:,} files  ({dropped_bytes / 1048576:.1f} MB)")
-    print(f"  dropped unreadable{skipped_read:,} files")
+    print(f"\n  kept                {kept:,} files  ({kept_bytes / 1048576:.1f} MB)")
+    print(f"  dropped generated   {skipped_generated:,} files  ({dropped_bytes / 1048576:.1f} MB)")
+    print(f"  dropped oversized   {skipped['oversized']:,} files  "
+          f"({oversized_bytes / 1048576:.1f} MB)")
+    print(f"  dropped binary      {skipped['binary']:,} files")
+    print(f"  dropped unreadable  {skipped['unreadable']:,} files")
     print(f"  wrote -> {args.out}")
 
 

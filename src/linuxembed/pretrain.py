@@ -44,9 +44,13 @@ class PackedTokenDataset(Dataset):
     parent process does not survive DataLoader forking cleanly.
     """
 
-    def __init__(self, bin_path: Path, seq_len: int):
+    def __init__(self, bin_path: Path, seq_len: int, n_special: int):
         self.bin_path = Path(bin_path)
         self.seq_len = seq_len
+        # Special tokens occupy ids [0, n_special) by construction (they are
+        # added first when the BPE vocabulary is trained), so the mask is a
+        # single vectorised comparison instead of a per-token Python loop.
+        self.n_special = n_special
         n_tokens = self.bin_path.stat().st_size // 2  # uint16
         self.n_windows = n_tokens // seq_len
         self._data: np.memmap | None = None
@@ -63,7 +67,14 @@ class PackedTokenDataset(Dataset):
         data = self._ensure()
         start = idx * self.seq_len
         window = data[start : start + self.seq_len].astype(np.int64)
-        return {"input_ids": torch.from_numpy(window)}
+        # Supplying the mask ourselves keeps DataCollatorForLanguageModeling off
+        # its fallback path, which calls get_special_tokens_mask per example and
+        # starves the GPU.
+        special = (window < self.n_special).astype(np.int64)
+        return {
+            "input_ids": torch.from_numpy(window),
+            "special_tokens_mask": torch.from_numpy(special),
+        }
 
 
 def build_model(tokenizer) -> BertForMaskedLM:
