@@ -77,16 +77,20 @@ def create_index(client, dim: int, hnsw: bool) -> None:
     if hnsw:
         vec_args += ["M", "16", "EF_CONSTRUCTION", "200"]
 
+    # `code` is deliberately NOT in the schema. It is still written to the hash
+    # and still returnable by FT.SEARCH RETURN -- only the inverted index is
+    # skipped. Full-text indexing ~700 MB of C would cost a large amount of
+    # memory and ingest time to support a lexical path that hybrid retrieval
+    # already covers in Python over the small candidate pool.
     client.execute_command(
         "FT.CREATE", INDEX_NAME,
         "ON", "HASH",
         "PREFIX", "1", KEY_PREFIX,
         "SCHEMA",
         "path", "TEXT",
-        "name", "TEXT", "SORTABLE",
+        "name", "TEXT", "NOSTEM", "SORTABLE",
         "kind", "TAG",
         "line", "NUMERIC",
-        "code", "TEXT", "NO_STEM",
         "embedding", "VECTOR", algo, str(len(vec_args)), *vec_args,
     )
     print(f"  created {INDEX_NAME}  ({algo}, COSINE, dim={dim})")
