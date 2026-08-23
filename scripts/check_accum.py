@@ -76,11 +76,34 @@ def main() -> None:
         results[accum] = (loss, gnorm)
         print(f"  accum {accum:<3d} batch {batch:<3d}  loss {loss:8.4f}  grad_norm {gnorm:8.3f}")
 
+    # Evaluation must NOT be normalised: prediction_step also routes through
+    # compute_loss, and dividing there makes eval_loss look artificially good.
+    print("\n  eval loss must match across accum (evaluation does no accumulation):")
+    eval_losses = {}
+    for batch, accum in ((64, 1), (16, 4)):
+        torch.manual_seed(config.SEED)
+        model = build_model(tok)
+        args_e = TrainingArguments(
+            output_dir="/tmp/check_accum_eval", per_device_eval_batch_size=32,
+            gradient_accumulation_steps=accum, bf16=torch.cuda.is_bf16_supported(),
+            report_to="none", save_strategy="no", seed=config.SEED,
+        )
+        small = torch.utils.data.Subset(ds, list(range(256)))
+        t = cls(model=model, args=args_e, eval_dataset=small, data_collator=collator)
+        eval_losses[accum] = t.evaluate()["eval_loss"]
+        print(f"    accum {accum:<3d} eval_loss {eval_losses[accum]:8.4f}")
+    eval_gap = abs(eval_losses[4] - eval_losses[1])
+
     ref = results[1][0]
     worst = max(abs(results[a][0] - ref) for a in results)
     print()
+    if eval_gap > 0.01:
+        print(f"  FAIL — eval_loss differs by {eval_gap:.4f} across accum settings;")
+        print("         the normalisation is leaking into the evaluation path.")
+        sys.exit(1)
     if worst < 0.1:
-        print(f"  PASS — all losses within {worst:.4f} of the accum=1 reference")
+        print(f"  PASS — train losses within {worst:.4f} of the accum=1 reference,")
+        print(f"         eval losses within {eval_gap:.4f}")
     else:
         print(f"  FAIL — losses differ by up to {worst:.4f}; accumulation is not normalised")
         print("         gradients are inflated by the accumulation factor, so the")

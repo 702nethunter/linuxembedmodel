@@ -39,14 +39,30 @@ class NormalizeAccumLossMixin:
     Mix in *before* the Trainer class so it takes precedence:
 
         class MyTrainer(NormalizeAccumLossMixin, Trainer): ...
+
+    The division applies to the training path ONLY. `Trainer.prediction_step`
+    also routes through `compute_loss`, so dividing unconditionally scales
+    `eval_loss` down by the accumulation factor as well -- which reads as the
+    model generalising far better than it trains (an eval loss of 0.33 against
+    a train loss of 1.34) and is pure artifact. Evaluation does no
+    accumulation, so it must not be normalised.
     """
+
+    _in_training_step = False
+
+    def training_step(self, *args, **kwargs):
+        self._in_training_step = True
+        try:
+            return super().training_step(*args, **kwargs)
+        finally:
+            self._in_training_step = False
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         out = super().compute_loss(
             model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
         )
         n = self.args.gradient_accumulation_steps
-        if n == 1:
+        if n == 1 or not self._in_training_step:
             return out
         if return_outputs:
             loss, rest = out
