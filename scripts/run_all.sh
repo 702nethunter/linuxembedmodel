@@ -9,6 +9,12 @@ export KERNEL_ROOT="${KERNEL_ROOT:-$HOME/linux}"
 # The 3070 fragments easily at 8 GB; expandable segments avoids OOM from
 # fragmentation rather than from genuine capacity.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Without this, Trainer's loss lines sit in a block-buffered stdout for hours
+# while only tqdm (stderr) flows, so a diverging run looks identical to a
+# healthy one until the buffer happens to flush.
+export PYTHONUNBUFFERED=1
+# Silences the fork warning once dataloader workers start.
+export TOKENIZERS_PARALLELISM=false
 
 PY="${PY:-python}"
 log() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
