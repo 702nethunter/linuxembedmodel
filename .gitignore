@@ -1,0 +1,16 @@
+# Generated data and model artifacts — reproducible from the pipeline, far too
+# large for git (corpus.jsonl ~870 MB, train.bin ~460 MB, checkpoints ~200 MB).
+data/
+artifacts/
+*.bin
+*.faiss
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+.DS_Store

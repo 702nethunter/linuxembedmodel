@@ -1,0 +1,11 @@
+# Install torch first with the CUDA build matching the box:
+#   pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+sentence-transformers==3.3.1
+transformers==4.47.1
+tokenizers>=0.21,<0.22
+datasets==3.2.0
+accelerate==1.2.1
+faiss-cpu==1.9.0
+numpy==1.26.4
+tqdm==4.67.1
