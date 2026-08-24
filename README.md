@@ -19,6 +19,28 @@ kernel-doc ──▶ mined NL→C pairs ──▶ stage 1: InfoNCE
                                               embedding model
 ```
 
+## The model
+
+Weights are on the Hugging Face Hub — 162 MB, loads directly with
+`sentence-transformers`:
+
+**https://huggingface.co/HF_REPO_ID**
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("HF_REPO_ID")
+emb = model.encode(["how are free pages coalesced into larger blocks"],
+                   normalize_embeddings=True)
+```
+
+**0.9050 recall@1 over 914,554 kernel chunks.** Queries and code share one
+encoder, with no prefix or instruction. Do not raise `max_seq_length` above 320
+— see [Open-corpus retrieval](#open-corpus-retrieval--the-number-that-matters).
+
+To publish a rebuild: `HF_REPO=<user>/linuxembed bash scripts/publish_hf.sh`
+(run it on the training box, where the weights already are).
+
 ## Why from scratch
 
 The usual move is to fine-tune `bert-base-uncased` or `microsoft/codebert-base`.
