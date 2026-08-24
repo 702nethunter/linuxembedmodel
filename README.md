@@ -292,6 +292,57 @@ micro-batch from a single kernel subsystem raises the firing rate 14×:
 InfoNCE-only control under identical batching — the only way to attribute a
 metric change to GIST rather than to the extra epochs.
 
+Run that way, with GIST firing 14× more often, it still loses to its own control:
+
+| arm (both from stage 1, grouped batches, same LR and epochs) | accuracy@1 | NDCG@10 |
+|---|---|---|
+| A — InfoNCE only (control) | 0.9220 | 0.9655 |
+| B — 0.6·GIST + 0.4·InfoNCE | 0.9200 | 0.9646 |
+
+So the verdict is not "GIST needed better conditions." Given conditions
+engineered in its favour, it is still marginally worse than not using it. The
+stage-1 InfoNCE checkpoint is the model this repo ships.
+
+That is a negative result about *this dataset*, not about GISTEmbed. Its
+mechanism needs a guide that is confused where the student is confident, and a
+negative-sampling scheme that actually produces false negatives. Curated sibling
+negatives and a self-guide give it neither.
+
+## Open-corpus retrieval — the number that matters
+
+The table above scores 2,000 queries against 4,000 candidates with the answer
+guaranteed present. That measures the contrastive objective, **not** retrieval.
+RAG searches the whole tree, where the answer competes with ~914k chunks, most
+of them undocumented code the model never saw as a positive.
+
+400 held-out kernel-doc anchors, scored against the **full 914,554-chunk index**:
+
+| metric | dense | **hybrid (dense + BM25 RRF)** |
+|---|---|---|
+| recall@1 | 0.8125 | **0.9050** |
+| recall@5 | 0.9375 | **0.9725** |
+| recall@10 | 0.9575 | **0.9775** |
+| recall@50 | 0.9850 | **0.9950** |
+| MRR | 0.8682 | **0.9374** |
+| median rank | 1 | 1 |
+
+The correct function is rank 1 out of 914,554 candidates 90% of the time. Hybrid
+is the default because of the +9.3 point recall@1 it buys.
+
+```bash
+python scripts/eval_open_corpus.py --n 400 --hybrid
+```
+
+**Do not judge this from spot checks.** Picking a symbol and asking where it
+ranks measures the wrong thing: for "acquire a mutex and sleep if it is
+contended" the true `mutex_lock` sits at rank 68, but the chunks above it are
+`mutex_lock_interruptible`, `__mutex_lock_slowpath` and friends — all good
+answers. Anecdotes said retrieval was weak and hybrid was a wash. Both were
+wrong, and only the 400-query measurement showed it.
+
+recall@50 = 0.995 also means a cross-encoder reranker is worth building: the
+answer is essentially always inside the pool a reranker would see.
+
 ## Searching the kernel
 
 ```bash

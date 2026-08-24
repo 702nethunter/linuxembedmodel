@@ -188,7 +188,13 @@ def main() -> None:
     a = sub.add_parser("ask", help="answer a question from retrieved kernel code")
     a.add_argument("question")
     a.add_argument("-k", type=int, default=8, help="excerpts to retrieve")
-    a.add_argument("--hybrid", action="store_true", help="re-rank with BM25 via RRF")
+    # Hybrid is on by default: measured over 400 held-out queries against the
+    # full 914k index it lifts recall@1 from 0.8125 to 0.9050 and MRR from
+    # 0.8682 to 0.9374. Two hand-picked queries had suggested it was a wash;
+    # they were wrong.
+    a.add_argument("--no-hybrid", dest="hybrid", action="store_false",
+                   help="dense only, skipping the BM25 rerank (default: hybrid)")
+    a.set_defaults(hybrid=True)
     a.add_argument("--store", choices=("redis", "npy"), default="redis",
                    help="redis: server-side KNN, nothing loaded per process; "
                         "npy: local array, no Redis needed")
