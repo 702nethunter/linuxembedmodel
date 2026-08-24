@@ -58,7 +58,7 @@ the contrastive stage supplies nearly all of the retrieval ability.
 ```python
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("REPLACE_WITH_HF_REPO_ID")
+model = SentenceTransformer("702nethunter/linuxembed")
 
 query = "how are free pages coalesced into larger blocks"
 code = """

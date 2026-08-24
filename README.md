@@ -11,25 +11,26 @@ kernel source ──▶ corpus ──▶ BPE tokenizer ──▶ packed tokens
                                                     │
                                               MLM pretrain (from random init)
                                                     │
-kernel-doc ──▶ mined NL→C pairs ──▶ stage 1: InfoNCE
+kernel-doc ──▶ mined NL→C pairs ──▶ stage 1: InfoNCE  ──▶ SHIPPED MODEL
                                                     │
                                     stage 2: 0.6·GISTEmbed + 0.4·InfoNCE
-                                             (self-guided by stage 1)
-                                                    │
-                                              embedding model
+                                             (self-guided) — measured, rejected
 ```
+
+Stage 2 is implemented and tested but **loses to its own control**; stage 1 is
+the model that ships. See [GIST did not earn its place](#gist-did-not-earn-its-place).
 
 ## The model
 
 Weights are on the Hugging Face Hub — 162 MB, loads directly with
 `sentence-transformers`:
 
-**https://huggingface.co/HF_REPO_ID**
+**https://huggingface.co/702nethunter/linuxembed**
 
 ```python
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("HF_REPO_ID")
+model = SentenceTransformer("702nethunter/linuxembed")
 emb = model.encode(["how are free pages coalesced into larger blocks"],
                    normalize_embeddings=True)
 ```
@@ -38,8 +39,12 @@ emb = model.encode(["how are free pages coalesced into larger blocks"],
 encoder, with no prefix or instruction. Do not raise `max_seq_length` above 320
 — see [Open-corpus retrieval](#open-corpus-retrieval--the-number-that-matters).
 
-To publish a rebuild: `HF_REPO=<user>/linuxembed bash scripts/publish_hf.sh`
-(run it on the training box, where the weights already are).
+The Hub repo is **private**; loading it needs an HF token with read access.
+
+To publish a rebuild: `bash scripts/publish_hf.sh` on the training box, where
+the weights already are. It defaults to `702nethunter/linuxembed` and to a
+private repo — set `HF_PRIVATE=0` to make it public, which is a licensing
+decision as much as a hosting one (see [Licensing](#licensing)).
 
 ## Why from scratch
 

@@ -12,9 +12,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-: "${HF_REPO:?set HF_REPO=<your-hf-username>/linuxembed}"
+HF_REPO="${HF_REPO:-702nethunter/linuxembed}"
 MODEL_DIR="${MODEL_DIR:-artifacts/embed-stage1-infonce}"
 HF="${HF:-huggingface-cli}"
+# Private by default. The weights are trained entirely on GPL-2.0 kernel source,
+# so publishing them is a licensing decision, not just a hosting one. Set
+# HF_PRIVATE=0 deliberately to make the repo public.
+HF_PRIVATE="${HF_PRIVATE:-1}"
 
 [ -f "$MODEL_DIR/model.safetensors" ] || {
   echo "no model at $MODEL_DIR" >&2; exit 1; }
@@ -42,7 +46,15 @@ sed "s|REPLACE_WITH_HF_REPO_ID|$HF_REPO|g" modelcard/README.md > "$STAGE/README.
 echo "  staged $(du -sh "$STAGE" | cut -f1) for $HF_REPO"
 ls -la "$STAGE"
 
-$HF repo create "$HF_REPO" --type model -y 2>/dev/null || \
+PRIVATE_FLAG=()
+if [ "$HF_PRIVATE" = "1" ]; then
+  PRIVATE_FLAG=(--private)
+  echo "  creating PRIVATE repo $HF_REPO"
+else
+  echo "  creating PUBLIC repo $HF_REPO"
+fi
+
+$HF repo create "$HF_REPO" --type model "${PRIVATE_FLAG[@]}" -y 2>/dev/null || \
   echo "  (repo already exists, uploading into it)"
 
 $HF upload "$HF_REPO" "$STAGE" . --repo-type model \
@@ -51,3 +63,6 @@ $HF upload "$HF_REPO" "$STAGE" . --repo-type model \
 echo
 echo "  published: https://huggingface.co/$HF_REPO"
 echo "  load with: SentenceTransformer(\"$HF_REPO\")"
+if [ "$HF_PRIVATE" = "1" ]; then
+  echo "  NOTE: repo is private — loading it needs an HF token with read access."
+fi
