@@ -28,7 +28,13 @@ from . import config
 from .search import INDEX_META, INDEX_NPY, dense_similarity, rrf_fuse
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-DEFAULT_LLM = "deepseek-coder:6.7b"
+# qwen2.5-coder:14b over deepseek-coder:6.7b. On the same retrieved context the
+# 6.7b model ignored the citation instruction and described page *splitting* as
+# merging -- it answered from general knowledge despite the prompt forbidding it.
+# The 14b cited its sources and named the actual functions in the excerpts
+# (find_buddy_page_pfn, __del_page_from_free_list, set_buddy_order). Grounding is
+# what a RAG is for, so the larger model is worth the VRAM here.
+DEFAULT_LLM = "qwen2.5-coder:14b"
 
 SYSTEM_PROMPT = """You are a Linux kernel expert answering questions about kernel source code.
 
