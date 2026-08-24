@@ -25,12 +25,12 @@ the model that ships. See [GIST did not earn its place](#gist-did-not-earn-its-p
 Weights are on the Hugging Face Hub — 162 MB, loads directly with
 `sentence-transformers`:
 
-**https://huggingface.co/702nethunter/linuxembed**
+**https://huggingface.co/nethunter2023/linuxembed**
 
 ```python
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("702nethunter/linuxembed")
+model = SentenceTransformer("nethunter2023/linuxembed")
 emb = model.encode(["how are free pages coalesced into larger blocks"],
                    normalize_embeddings=True)
 ```

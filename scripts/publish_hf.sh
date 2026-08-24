@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-HF_REPO="${HF_REPO:-702nethunter/linuxembed}"
+HF_REPO="${HF_REPO:-nethunter2023/linuxembed}"
 MODEL_DIR="${MODEL_DIR:-artifacts/embed-stage1-infonce}"
 HF="${HF:-huggingface-cli}"
 # Private by default. The weights are trained entirely on GPL-2.0 kernel source,
